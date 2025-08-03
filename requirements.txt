@@ -1,0 +1,6 @@
+flask
+qdrant-client
+sentence-transformers
+pymupdf
+google-generativeai
+requests
