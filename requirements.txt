@@ -4,5 +4,4 @@ sentence-transformers
 pymupdf
 google-generativeai
 requests
-uvicorn[standard]
 gunicorn
