@@ -1,6 +1,7 @@
 flask
 gunicorn
-qdrant-client
-sentence-transformers
-pymupdf
 requests
+pymupdf
+qdrant-client
+spacy
+google-generativeai

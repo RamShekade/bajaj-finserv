@@ -19,9 +19,9 @@ EXPECTED_API_KEY = os.getenv("EXPECTED_API_KEY")  # <-- set in Railway envs
 
 # ---- INITIALIZE ----
 client = QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY)
-embedder = SentenceTransformer(EMBED_MODEL)
+nlp = spacy.load("en_core_web_md")
 genai.configure(api_key=GEMINI_API_KEY)
-gemini_model = genai.GenerativeModel("gemini-2.0-flash")  # or "gemini-pro"
+gemini_model = genai.GenerativeModel("gemini-2.0-flash")
 
 app = Flask(__name__)
 
@@ -43,7 +43,7 @@ def chunk_text(text, max_words=200):
     return chunks
 
 def add_chunks_to_qdrant(chunks, source_name):
-    vectors = embedder.encode(chunks).tolist()
+    vectors = [nlp(chunk).vector.tolist() for chunk in chunks]
     from qdrant_client.models import PointStruct
     points = [
         PointStruct(
@@ -56,7 +56,7 @@ def add_chunks_to_qdrant(chunks, source_name):
     client.upsert(collection_name=COLLECTION_NAME, points=points)
 
 def search_qdrant(query, top_k=5):
-    query_vec = embedder.encode([query])[0].tolist()
+    query_vec = nlp(query).vector.tolist()
     results = client.search(
         collection_name=COLLECTION_NAME,
         query_vector=query_vec,
@@ -64,7 +64,7 @@ def search_qdrant(query, top_k=5):
     )
     return [r.payload["text"] for r in results]
 
-def call_gemini_flash(query: str, relevant_chunks: List[str]) -> str:
+def call_gemini_flash(query, relevant_chunks):
     prompt = f"""You are an insurance policy assistant.
 The user asked: {query}
 Here are relevant clauses from the document:
@@ -85,14 +85,13 @@ def get_pdf_text(pdf_url):
     return extract_text_from_pdf(pdf_bytes)
 
 def ensure_doc_indexed(doc_text, source_name):
-    # Always clear previous doc chunks so only current doc is used
     try:
         client.delete_collection(collection_name=COLLECTION_NAME)
     except Exception:
-        pass  # Collection might not exist
+        pass
     client.create_collection(
         collection_name=COLLECTION_NAME,
-        vectors_config={"size": embedder.get_sentence_embedding_dimension(), "distance": "Cosine"}
+        vectors_config={"size": nlp.vocab.vectors_length, "distance": "Cosine"}
     )
     chunks = chunk_text(doc_text)
     add_chunks_to_qdrant(chunks, source_name)
