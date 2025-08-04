@@ -4,25 +4,26 @@ from flask import Flask, request, jsonify
 from qdrant_client import QdrantClient
 import fitz  # PyMuPDF
 import uuid
-import spacy
+import gensim.downloader as api
+import numpy as np
 import google.generativeai as genai
 
-# ---- CONFIG: Use environment variables for secrets ----
+# ---- CONFIG ----
 QDRANT_URL = "https://c8df992d-b432-4052-b952-145841797199.us-east4-0.gcp.cloud.qdrant.io:6333"
 QDRANT_API_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJhY2Nlc3MiOiJtIn0.Z_FhOR0cy8m4lNqLU4x6d_IGaSx-Avhxn-piRXKgdFs"
 COLLECTION_NAME = "insurance-docs"
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-EXPECTED_API_KEY = os.getenv("EXPECTED_API_KEY")  # <-- set in Railway envs
+EXPECTED_API_KEY = os.getenv("EXPECTED_API_KEY")
 
-# ---- INITIALIZE ----
 client = QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY)
-nlp = spacy.load("en_core_web_md")
 genai.configure(api_key=GEMINI_API_KEY)
 gemini_model = genai.GenerativeModel("gemini-2.0-flash")
 
+# Download small word2vec model at runtime (done once)
+wv = api.load("glove-wiki-gigaword-50")  # 50d vectors, ~70MB
+
 app = Flask(__name__)
 
-# ---- UTILS ----
 def extract_text_from_pdf(pdf_bytes):
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     return " ".join(page.get_text() for page in doc)
@@ -39,8 +40,15 @@ def chunk_text(text, max_words=200):
         chunks.append(". ".join(chunk))
     return chunks
 
+def get_text_embedding(text):
+    words = [w for w in text.split() if w in wv]
+    if words:
+        return np.mean([wv[w] for w in words], axis=0)
+    else:
+        return np.zeros(wv.vector_size)
+
 def add_chunks_to_qdrant(chunks, source_name):
-    vectors = [nlp(chunk).vector.tolist() for chunk in chunks]
+    vectors = [get_text_embedding(chunk).tolist() for chunk in chunks]
     from qdrant_client.models import PointStruct
     points = [
         PointStruct(
@@ -53,7 +61,7 @@ def add_chunks_to_qdrant(chunks, source_name):
     client.upsert(collection_name=COLLECTION_NAME, points=points)
 
 def search_qdrant(query, top_k=5):
-    query_vec = nlp(query).vector.tolist()
+    query_vec = get_text_embedding(query).tolist()
     results = client.search(
         collection_name=COLLECTION_NAME,
         query_vector=query_vec,
@@ -88,7 +96,7 @@ def ensure_doc_indexed(doc_text, source_name):
         pass
     client.create_collection(
         collection_name=COLLECTION_NAME,
-        vectors_config={"size": nlp.vocab.vectors_length, "distance": "Cosine"}
+        vectors_config={"size": wv.vector_size, "distance": "Cosine"}
     )
     chunks = chunk_text(doc_text)
     add_chunks_to_qdrant(chunks, source_name)

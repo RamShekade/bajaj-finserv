@@ -6,3 +6,5 @@ spacy
 qdrant-client
 google-generativeai
 scipy
+gensim
+numpy
