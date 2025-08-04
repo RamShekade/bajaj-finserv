@@ -6,13 +6,11 @@ import fitz  # PyMuPDF
 import uuid
 import spacy
 import google.generativeai as genai
-from scipy.spatial.distance import cosine
 
 # ---- CONFIG: Use environment variables for secrets ----
 QDRANT_URL = "https://c8df992d-b432-4052-b952-145841797199.us-east4-0.gcp.cloud.qdrant.io:6333"
 QDRANT_API_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJhY2Nlc3MiOiJtIn0.Z_FhOR0cy8m4lNqLU4x6d_IGaSx-Avhxn-piRXKgdFs"
 COLLECTION_NAME = "insurance-docs"
-EMBED_MODEL = "paraphrase-MiniLM-L6-v2"  # Efficient & small
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 EXPECTED_API_KEY = os.getenv("EXPECTED_API_KEY")  # <-- set in Railway envs
 
