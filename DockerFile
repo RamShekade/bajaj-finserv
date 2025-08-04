@@ -5,11 +5,13 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y libmupdf-dev && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN python -m venv --copies /opt/venv && . /opt/venv/bin/activate && pip install --no-cache-dir -r requirements.txt
 
-# Download spaCy model
-RUN python -m spacy download en_core_web_md
+# Download the spaCy model inside the venv
+RUN . /opt/venv/bin/activate && python -m spacy download en_core_web_md
 
-COPY . .
+COPY . /app
+
+ENV PATH="/opt/venv/bin:$PATH"
 
 CMD ["gunicorn", "main:app", "--bind", "0.0.0.0:$PORT"]
