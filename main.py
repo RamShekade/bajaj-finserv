@@ -1,13 +1,12 @@
-
 import os
 import requests
 from flask import Flask, request, jsonify
-from typing import List
 from qdrant_client import QdrantClient
-from sentence_transformers import SentenceTransformer
 import fitz  # PyMuPDF
 import uuid
+import spacy
 import google.generativeai as genai
+from scipy.spatial.distance import cosine
 
 # ---- CONFIG: Use environment variables for secrets ----
 QDRANT_URL = "https://c8df992d-b432-4052-b952-145841797199.us-east4-0.gcp.cloud.qdrant.io:6333"
