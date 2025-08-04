@@ -2,6 +2,7 @@ flask
 gunicorn
 requests
 pymupdf
-qdrant-client
 spacy
+qdrant-client
 google-generativeai
+scipy
