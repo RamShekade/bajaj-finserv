@@ -19,7 +19,7 @@ client = QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY)
 genai.configure(api_key=GEMINI_API_KEY)
 gemini_model = genai.GenerativeModel("gemini-2.0-flash")
 
-# Load Gensim model from disk (model downloaded in Docker build)
+# Download small word2vec model at runtime (done once)
 wv = api.load("glove-wiki-gigaword-50")  # 50d vectors, ~70MB
 
 app = Flask(__name__)
@@ -109,7 +109,7 @@ def answer_questions(source_name, questions):
         answers.append(answer)
     return answers
 
-@app.route("/hackrx/run", methods=["POST"])
+@app.route("/hackrx/run", methods=["GET","POST"])
 def hackrx_run():
     # --- AUTH ---
     auth = request.headers.get("Authorization", "")
@@ -144,3 +144,7 @@ def hackrx_run():
 @app.route("/", methods=["GET"])
 def home():
     return {"status": "ok"}
+
+@app.route("/", methods=["POST"])
+def home():
+    return {"status": "Post ok"}
