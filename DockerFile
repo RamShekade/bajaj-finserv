@@ -7,7 +7,7 @@ RUN apt-get update && apt-get install -y libmupdf-dev && rm -rf /var/lib/apt/lis
 COPY requirements.txt .
 RUN python -m venv /opt/venv && . /opt/venv/bin/activate && pip install --no-cache-dir -r requirements.txt
 
-# Download gensim model during build
+# Download gensim model during build (this is the key fix)
 RUN . /opt/venv/bin/activate && python -m gensim.downloader --download glove-wiki-gigaword-50
 
 COPY . /app
