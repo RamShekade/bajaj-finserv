@@ -1,28 +1,25 @@
-
-
-
 import os
 import uuid
 import fitz  # PyMuPDF
-import re
+import numpy as np
 from tqdm import tqdm
+import gensim.downloader as api
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams, PointStruct
-from sentence_transformers import SentenceTransformer
 
 # --------------------------
 # 🔧 Qdrant + Embedding Config
 # --------------------------
 QDRANT_URL = "https://c8df992d-b432-4052-b952-145841797199.us-east4-0.gcp.cloud.qdrant.io:6333"
 QDRANT_API_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJhY2Nlc3MiOiJtIn0.Z_FhOR0cy8m4lNqLU4x6d_IGaSx-Avhxn-piRXKgdFs"
-COLLECTION_NAME = "insurance-docs"
-EMBED_MODEL_NAME = "paraphrase-mpnet-base-v2"  # 768-dim output
+COLLECTION_NAME = "insurance"
+EMBED_MODEL_NAME = "glove-wiki-gigaword-50"  # 50-dim GloVe embeddings
 
 # --------------------------
 # ✅ Initialize
 # --------------------------
 qdrant = QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY)
-model = SentenceTransformer(EMBED_MODEL_NAME)
+wv = api.load(EMBED_MODEL_NAME)  # Load GloVe embeddings
 
 # --------------------------
 # 1. Create Qdrant collection (if not exists)
@@ -31,7 +28,7 @@ def init_collection():
     if COLLECTION_NAME not in [c.name for c in qdrant.get_collections().collections]:
         qdrant.create_collection(
             COLLECTION_NAME,
-            vectors_config=VectorParams(size=768, distance=Distance.COSINE)
+            vectors_config=VectorParams(size=50, distance=Distance.COSINE)
         )
         print(f"✅ Created collection: {COLLECTION_NAME}")
     else:
@@ -53,16 +50,25 @@ def split_into_chunks(text, max_words=120, overlap=30):
     words = text.split()
     chunks = []
     i = 0
-
     while i < len(words):
         chunk = words[i:i + max_words]
         chunks.append(" ".join(chunk))
         i += max_words - overlap  # slide forward with overlap
-
     return chunks
 
 # --------------------------
-# 4. Upload Chunks to Qdrant
+# 4. Get GloVe embedding for a chunk
+# --------------------------
+def get_chunk_embedding(text):
+    words = text.split()
+    vecs = [wv[word] for word in words if word in wv]
+    if vecs:
+        return np.mean(vecs, axis=0)
+    else:
+        return np.zeros(wv.vector_size)
+
+# --------------------------
+# 5. Upload Chunks to Qdrant
 # --------------------------
 def upload_chunks(pdf_path):
     pdf_name = os.path.basename(pdf_path)
@@ -77,7 +83,10 @@ def upload_chunks(pdf_path):
     chunks = split_into_chunks(raw_text, max_words=120, overlap=30)
     print(f"🧩 Found {len(chunks)} chunks.")
 
-    embeddings = model.encode(chunks, batch_size=8, show_progress_bar=True)
+    embeddings = []
+    for chunk in tqdm(chunks, desc="Embedding Chunks"):
+        emb = get_chunk_embedding(chunk)
+        embeddings.append(emb.tolist())
 
     points = [
         PointStruct(
@@ -96,7 +105,7 @@ def upload_chunks(pdf_path):
     print(f"✅ Uploaded {len(points)} chunks from {pdf_name}.")
 
 # --------------------------
-# 5. Run Script
+# 6. Run Script
 # --------------------------
 if __name__ == "__main__":
     init_collection()

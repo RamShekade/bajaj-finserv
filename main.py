@@ -12,7 +12,7 @@ import re
 # ---- CONFIG ----
 QDRANT_URL = "https://c8df992d-b432-4052-b952-145841797199.us-east4-0.gcp.cloud.qdrant.io:6333"
 QDRANT_API_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJhY2Nlc3MiOiJtIn0.Z_FhOR0cy8m4lNqLU4x6d_IGaSx-Avhxn-piRXKgdFs"
-COLLECTION_NAME = "insurance-docs"
+COLLECTION_NAME = "insurance"
 GEMINI_API_KEY = "AIzaSyAXMJzR77i8gq0XAqIn-15rHHuyVfgSqSs"
 EXPECTED_API_KEY = "74915bc2932a330cb216159be4298485ee0af534a2d30eacee1be61d2158d6b2"
 
