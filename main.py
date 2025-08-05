@@ -26,7 +26,6 @@ app = Flask(__name__)
 
 def extract_text_from_pdf(pdf_bytes):
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-    # Extract paragraphs, preserving sections/clauses if possible
     paragraphs = []
     for page in doc:
         text = page.get_text()
@@ -44,7 +43,6 @@ def extract_text_from_pdf(pdf_bytes):
     return paragraphs
 
 def chunk_paragraphs(paragraphs, max_words=200):
-    # Combine paragraphs to not exceed max_words
     chunks = []
     current_chunk = []
     current_len = 0
@@ -62,7 +60,6 @@ def chunk_paragraphs(paragraphs, max_words=200):
     return chunks
 
 def get_clause_number(chunk):
-    # Try to extract section/clause numbers for citation
     match = re.search(r'([0-9]{1,2}(\.[0-9]{1,2})*)', chunk)
     return match.group(0) if match else None
 
@@ -91,36 +88,49 @@ def add_chunks_to_qdrant(chunks, source_name):
     ]
     client.upsert(collection_name=COLLECTION_NAME, points=points)
 
-def search_qdrant(query, top_k=10):
+def search_qdrant_with_fallback(query, doc_source_name, top_k=5):
     query_vec = get_text_embedding(query).tolist()
-    results = client.search(
+    # First, search in the uploaded document
+    results_doc = client.search(
         collection_name=COLLECTION_NAME,
         query_vector=query_vec,
         limit=top_k,
+        filter={"must": [{"key": "source", "match": {"value": doc_source_name}}]},
     )
-    # Diversify: filter unique chunks
-    unique_chunks = []
-    seen_texts = set()
-    for r in results:
-        t = r.payload["text"]
-        clause = r.payload.get("clause")
-        if t not in seen_texts:
-            unique_chunks.append({'text': t, 'clause': clause})
-            seen_texts.add(t)
-    return unique_chunks[:5]
+    doc_chunks = [{'text': r.payload["text"], 'clause': r.payload.get("clause")} for r in results_doc]
 
-def call_gemini_flash(query, relevant_chunks):
+    # Fallback to global DB if not found
+    if not doc_chunks or all(not c['text'].strip() for c in doc_chunks):
+        results_fallback = client.search(
+            collection_name=COLLECTION_NAME,
+            query_vector=query_vec,
+            limit=top_k,
+        )
+        fallback_chunks = [{'text': r.payload["text"], 'clause': r.payload.get("clause")} for r in results_fallback]
+        return doc_chunks, fallback_chunks
+    else:
+        return doc_chunks, None
+
+def call_gemini_flash(query, relevant_chunks, fallback_chunks=None):
     prompt = f"""You are an insurance policy assistant.
 The user asked: {query}
-Here are relevant clauses from the insurance document:"""
+
+Here are relevant clauses from the uploaded document:
+"""
     for i, chunk in enumerate(relevant_chunks):
-        clause = chunk["clause"]
+        clause = chunk.get("clause")
         clause_info = f" (Clause {clause})" if clause else ""
         prompt += f"\n{str(i+1)}.{clause_info} {chunk['text']}"
+
+    if fallback_chunks:
+        prompt += "\n\nHere is additional context from other insurance documents in the database:"
+        for i, chunk in enumerate(fallback_chunks):
+            clause = chunk.get("clause")
+            clause_info = f" (Clause {clause})" if clause else ""
+            prompt += f"\n{str(i+1)}.{clause_info} {chunk['text']}"
+
     prompt += """
-Based on these clauses, answer the user's query.
-Cite the clause or section number if relevant. If not found in the provided clauses, say "Not found in provided document."
-Return only the answer."""
+If the uploaded document provides a clear answer, cite it. If not, use the context from other documents and clearly state that the answer is based on general insurance knowledge. Always answer professionally."""
     try:
         response = gemini_model.generate_content(prompt)
         return response.text.strip()
@@ -148,14 +158,13 @@ def ensure_doc_indexed(paragraphs, source_name):
 def answer_questions(source_name, questions):
     answers = []
     for q in questions:
-        relevant_chunks = search_qdrant(q, top_k=10)
-        answer = call_gemini_flash(q, relevant_chunks)
+        doc_chunks, fallback_chunks = search_qdrant_with_fallback(q, source_name, top_k=5)
+        answer = call_gemini_flash(q, doc_chunks, fallback_chunks)
         answers.append(answer)
     return answers
 
 @app.route("/hackrx/run", methods=["POST"])
 def hackrx_run():
-    # --- AUTH ---
     auth = request.headers.get("Authorization", "")
     if not auth.startswith("Bearer "):
         return jsonify({"error": "Missing or invalid Authorization header"}), 401
@@ -163,7 +172,6 @@ def hackrx_run():
     if api_key != EXPECTED_API_KEY:
         return jsonify({"error": "Invalid API key"}), 403
 
-    # --- REQUEST DATA ---
     if not request.is_json:
         return jsonify({"error": "Content-Type must be application/json"}), 415
     data = request.get_json()
@@ -174,14 +182,12 @@ def hackrx_run():
     if not isinstance(questions, list):
         return jsonify({"error": "'questions' must be a list"}), 400
 
-    # --- PROCESS DOCUMENT ---
     try:
         paragraphs = get_pdf_paragraphs(pdf_url)
         ensure_doc_indexed(paragraphs, pdf_url)
     except Exception as e:
         return jsonify({"error": f"Could not process document: {str(e)}"}), 400
 
-    # --- ANSWER QUESTIONS ---
     answers = answer_questions(pdf_url, questions)
     return jsonify({"answers": answers})
 
