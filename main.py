@@ -144,7 +144,3 @@ def hackrx_run():
 @app.route("/", methods=["GET"])
 def home():
     return {"status": "ok"}
-
-@app.route("/", methods=["POST"])
-def home():
-    return {"status": "Post ok"}
