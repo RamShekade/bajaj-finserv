@@ -135,7 +135,12 @@ Here are relevant clauses from the uploaded document:
             prompt += f"\n{str(i+1)}.{clause_info} {chunk['text']}"
 
     prompt += """
-If the uploaded document provides a clear answer, cite it. If not, use the context from other documents and clearly state that the answer is based on general insurance knowledge. Always answer professionally."""
+    Instructions:
+    - Return your answer as plain text only.
+    - Do not use any Markdown formatting (no bold, italics, bullet points, or backslashes).
+    - Cite clauses or sections if relevant, but keep the answer clear and easy to read.
+    - If the uploaded document provides a clear answer, cite it. If not, use context from other documents and clearly state that the answer is based on general insurance knowledge.
+    - Always answer professionally."""
     try:
         response = gemini_model.generate_content(prompt)
         return response.text.strip()
