@@ -90,26 +90,31 @@ def add_chunks_to_qdrant(chunks, source_name):
 
 def search_qdrant_with_fallback(query, doc_source_name, top_k=5):
     query_vec = get_text_embedding(query).tolist()
-    # First, search in the uploaded document
+    # Get more results to filter manually
     results_doc = client.search(
         collection_name=COLLECTION_NAME,
         query_vector=query_vec,
-        limit=top_k,
-        filter={"must": [{"key": "source", "match": {"value": doc_source_name}}]},
+        limit=top_k * 5,  # get enough to filter
     )
-    doc_chunks = [{'text': r.payload["text"], 'clause': r.payload.get("clause")} for r in results_doc]
-
-    # Fallback to global DB if not found
+    # Manually filter for source_name
+    doc_chunks = [
+        {'text': r.payload["text"], 'clause': r.payload.get("clause")}
+        for r in results_doc if r.payload.get("source") == doc_source_name
+    ]
+    doc_chunks = doc_chunks[:top_k]
+    # Fallback to full DB if not found in doc
+    fallback_chunks = None
     if not doc_chunks or all(not c['text'].strip() for c in doc_chunks):
         results_fallback = client.search(
             collection_name=COLLECTION_NAME,
             query_vector=query_vec,
             limit=top_k,
         )
-        fallback_chunks = [{'text': r.payload["text"], 'clause': r.payload.get("clause")} for r in results_fallback]
-        return doc_chunks, fallback_chunks
-    else:
-        return doc_chunks, None
+        fallback_chunks = [
+            {'text': r.payload["text"], 'clause': r.payload.get("clause")}
+            for r in results_fallback
+        ]
+    return doc_chunks, fallback_chunks
 
 def call_gemini_flash(query, relevant_chunks, fallback_chunks=None):
     prompt = f"""You are an insurance policy assistant.
