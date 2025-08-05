@@ -7,6 +7,7 @@ import uuid
 import gensim.downloader as api
 import numpy as np
 import google.generativeai as genai
+import re
 
 # ---- CONFIG ----
 QDRANT_URL = "https://c8df992d-b432-4052-b952-145841797199.us-east4-0.gcp.cloud.qdrant.io:6333"
@@ -19,26 +20,51 @@ client = QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY)
 genai.configure(api_key=GEMINI_API_KEY)
 gemini_model = genai.GenerativeModel("gemini-2.0-flash")
 
-# Download small word2vec model at runtime (done once)
-wv = api.load("glove-wiki-gigaword-50")  # 50d vectors, ~70MB
+wv = api.load("glove-wiki-gigaword-50")  # 50d vectors
 
 app = Flask(__name__)
 
 def extract_text_from_pdf(pdf_bytes):
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-    return " ".join(page.get_text() for page in doc)
+    # Extract paragraphs, preserving sections/clauses if possible
+    paragraphs = []
+    for page in doc:
+        text = page.get_text()
+        lines = text.split('\n')
+        buffer = []
+        for line in lines:
+            if line.strip() == "":
+                if buffer:
+                    paragraphs.append(" ".join(buffer).strip())
+                    buffer = []
+            else:
+                buffer.append(line.strip())
+        if buffer:
+            paragraphs.append(" ".join(buffer).strip())
+    return paragraphs
 
-def chunk_text(text, max_words=200):
-    sentences = text.split(". ")
-    chunks, chunk = [], []
-    for sentence in sentences:
-        chunk.append(sentence)
-        if len(" ".join(chunk).split()) > max_words:
-            chunks.append(". ".join(chunk))
-            chunk = []
-    if chunk:
-        chunks.append(". ".join(chunk))
+def chunk_paragraphs(paragraphs, max_words=200):
+    # Combine paragraphs to not exceed max_words
+    chunks = []
+    current_chunk = []
+    current_len = 0
+    for para in paragraphs:
+        length = len(para.split())
+        if current_len + length > max_words:
+            if current_chunk:
+                chunks.append(" ".join(current_chunk))
+                current_chunk = []
+                current_len = 0
+        current_chunk.append(para)
+        current_len += length
+    if current_chunk:
+        chunks.append(" ".join(current_chunk))
     return chunks
+
+def get_clause_number(chunk):
+    # Try to extract section/clause numbers for citation
+    match = re.search(r'([0-9]{1,2}(\.[0-9]{1,2})*)', chunk)
+    return match.group(0) if match else None
 
 def get_text_embedding(text):
     words = [w for w in text.split() if w in wv]
@@ -54,42 +80,60 @@ def add_chunks_to_qdrant(chunks, source_name):
         PointStruct(
             id=str(uuid.uuid4()),
             vector=vec,
-            payload={"text": chunk, "source": source_name, "chunk_index": i}
+            payload={
+                "text": chunk,
+                "source": source_name,
+                "chunk_index": i,
+                "clause": get_clause_number(chunk)
+            }
         )
         for i, (chunk, vec) in enumerate(zip(chunks, vectors))
     ]
     client.upsert(collection_name=COLLECTION_NAME, points=points)
 
-def search_qdrant(query, top_k=5):
+def search_qdrant(query, top_k=10):
     query_vec = get_text_embedding(query).tolist()
     results = client.search(
         collection_name=COLLECTION_NAME,
         query_vector=query_vec,
         limit=top_k,
     )
-    return [r.payload["text"] for r in results]
+    # Diversify: filter unique chunks
+    unique_chunks = []
+    seen_texts = set()
+    for r in results:
+        t = r.payload["text"]
+        clause = r.payload.get("clause")
+        if t not in seen_texts:
+            unique_chunks.append({'text': t, 'clause': clause})
+            seen_texts.add(t)
+    return unique_chunks[:5]
 
 def call_gemini_flash(query, relevant_chunks):
     prompt = f"""You are an insurance policy assistant.
 The user asked: {query}
-Here are relevant clauses from the document:
-""" + "\n".join(f"{i+1}. {chunk}" for i, chunk in enumerate(relevant_chunks))
+Here are relevant clauses from the insurance document:"""
+    for i, chunk in enumerate(relevant_chunks):
+        clause = chunk["clause"]
+        clause_info = f" (Clause {clause})" if clause else ""
+        prompt += f"\n{str(i+1)}.{clause_info} {chunk['text']}"
     prompt += """
-Based on these clauses, answer the user's query. 
-Return only the answer, and cite the clause or section if relevant."""
+Based on these clauses, answer the user's query.
+Cite the clause or section number if relevant. If not found in the provided clauses, say "Not found in provided document."
+Return only the answer."""
     try:
         response = gemini_model.generate_content(prompt)
         return response.text.strip()
     except Exception as e:
         return f"Error: {str(e)}"
 
-def get_pdf_text(pdf_url):
+def get_pdf_paragraphs(pdf_url):
     response = requests.get(pdf_url)
     response.raise_for_status()
     pdf_bytes = response.content
     return extract_text_from_pdf(pdf_bytes)
 
-def ensure_doc_indexed(doc_text, source_name):
+def ensure_doc_indexed(paragraphs, source_name):
     try:
         client.delete_collection(collection_name=COLLECTION_NAME)
     except Exception:
@@ -98,18 +142,18 @@ def ensure_doc_indexed(doc_text, source_name):
         collection_name=COLLECTION_NAME,
         vectors_config={"size": wv.vector_size, "distance": "Cosine"}
     )
-    chunks = chunk_text(doc_text)
+    chunks = chunk_paragraphs(paragraphs)
     add_chunks_to_qdrant(chunks, source_name)
 
 def answer_questions(source_name, questions):
     answers = []
     for q in questions:
-        relevant_chunks = search_qdrant(q, top_k=5)
+        relevant_chunks = search_qdrant(q, top_k=10)
         answer = call_gemini_flash(q, relevant_chunks)
         answers.append(answer)
     return answers
 
-@app.route("/hackrx/run", methods=["GET","POST"])
+@app.route("/hackrx/run", methods=["POST"])
 def hackrx_run():
     # --- AUTH ---
     auth = request.headers.get("Authorization", "")
@@ -132,8 +176,8 @@ def hackrx_run():
 
     # --- PROCESS DOCUMENT ---
     try:
-        document_text = get_pdf_text(pdf_url)
-        ensure_doc_indexed(document_text, pdf_url)
+        paragraphs = get_pdf_paragraphs(pdf_url)
+        ensure_doc_indexed(paragraphs, pdf_url)
     except Exception as e:
         return jsonify({"error": f"Could not process document: {str(e)}"}), 400
 
