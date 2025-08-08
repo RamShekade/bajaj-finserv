@@ -8,3 +8,7 @@ google-generativeai
 scipy
 gensim
 numpy
+faiss-cpu
+sentence-transformers
+torch
+transformers

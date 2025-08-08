@@ -8,168 +8,161 @@ import gensim.downloader as api
 import numpy as np
 import google.generativeai as genai
 import re
+import faiss
+from sentence_transformers import SentenceTransformer
+
 
 # ---- CONFIG ----
 QDRANT_URL = "https://c8df992d-b432-4052-b952-145841797199.us-east4-0.gcp.cloud.qdrant.io:6333"
 QDRANT_API_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJhY2Nlc3MiOiJtIn0.Z_FhOR0cy8m4lNqLU4x6d_IGaSx-Avhxn-piRXKgdFs"
 COLLECTION_NAME = "insurance"
-GEMINI_API_KEY = "AIzaSyAXMJzR77i8gq0XAqIn-15rHHuyVfgSqSs"
+GEMINI_API_KEY = "AIzaSyBcieQSbcnDkWnxcRyHKusdp5-TQWK-5Fs"
 EXPECTED_API_KEY = "74915bc2932a330cb216159be4298485ee0af534a2d30eacee1be61d2158d6b2"
 
 client = QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY)
 genai.configure(api_key=GEMINI_API_KEY)
 gemini_model = genai.GenerativeModel("gemini-2.0-flash")
 
-wv = api.load("glove-wiki-gigaword-50")  # 50d vectors
+embedder = SentenceTransformer("paraphrase-MiniLM-L6-v2")
+EMBED_DIM = 384
 
 app = Flask(__name__)
 
 def extract_text_from_pdf(pdf_bytes):
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-    paragraphs = []
+    text = ""
     for page in doc:
-        text = page.get_text()
-        lines = text.split('\n')
-        buffer = []
-        for line in lines:
-            if line.strip() == "":
-                if buffer:
-                    paragraphs.append(" ".join(buffer).strip())
-                    buffer = []
-            else:
-                buffer.append(line.strip())
-        if buffer:
-            paragraphs.append(" ".join(buffer).strip())
-    return paragraphs
+        text += page.get_text() + "\n"
+    return text
 
-def chunk_paragraphs(paragraphs, max_words=200):
+def clause_level_chunking(text, min_words=20):
+    """
+    Improved chunking: splits on clause/section numbers and bullet points.
+    Each chunk is a clause or section (with overlap for context).
+    """
+    # Use regex to split at clause/section headers (customize as needed)
+    split_regex = r"(?=([A-Z]?\d{1,2}(\.[a-zA-Z0-9]+)*\.?\s)|(\n\s*-\s)|(\n\s*\u2022\s))"
+    candidates = re.split(split_regex, text)
+    # Recombine matches into chunks
     chunks = []
-    current_chunk = []
-    current_len = 0
-    for para in paragraphs:
-        length = len(para.split())
-        if current_len + length > max_words:
-            if current_chunk:
-                chunks.append(" ".join(current_chunk))
-                current_chunk = []
-                current_len = 0
-        current_chunk.append(para)
-        current_len += length
-    if current_chunk:
-        chunks.append(" ".join(current_chunk))
-    return chunks
+    chunk = ""
+    for part in candidates:
+        if part is None:
+            continue
+        if part.strip() == "":
+            continue
+        if re.match(r"^([A-Z]?\d{1,2}(\.[a-zA-Z0-9]+)*\.?)$", part.strip()):
+            if chunk.strip():
+                chunks.append(chunk.strip())
+            chunk = part
+        else:
+            chunk += " " + part
+    if chunk.strip():
+        chunks.append(chunk.strip())
+    # Filter out very small chunks
+    chunks = [c for c in chunks if len(c.split()) >= min_words]
+    # Add overlap (previous chunk) for context
+    overlapped_chunks = []
+    prev = ""
+    for c in chunks:
+        if prev:
+            overlapped_chunks.append(prev + " " + c)
+        else:
+            overlapped_chunks.append(c)
+        prev = c
+    return overlapped_chunks
 
 def get_clause_number(chunk):
-    match = re.search(r'([0-9]{1,2}(\.[0-9]{1,2})*)', chunk)
+    # Try to extract clause/section number from beginning of chunk
+    match = re.match(r"([A-Z]?\d{1,2}(\.[a-zA-Z0-9]+)*)", chunk.strip())
     return match.group(0) if match else None
 
 def get_text_embedding(text):
-    words = [w for w in text.split() if w in wv]
-    if words:
-        return np.mean([wv[w] for w in words], axis=0)
-    else:
-        return np.zeros(wv.vector_size)
+    # Use sentence-transformers for strong semantic retrieval
+    emb = embedder.encode([text], normalize_embeddings=True)
+    return emb[0].astype(np.float32)
 
-def add_chunks_to_qdrant(chunks, source_name):
-    vectors = [get_text_embedding(chunk).tolist() for chunk in chunks]
-    from qdrant_client.models import PointStruct
-    points = [
-        PointStruct(
-            id=str(uuid.uuid4()),
-            vector=vec,
-            payload={
-                "text": chunk,
-                "source": source_name,
-                "chunk_index": i,
-                "clause": get_clause_number(chunk)
-            }
-        )
-        for i, (chunk, vec) in enumerate(zip(chunks, vectors))
-    ]
-    client.upsert(collection_name=COLLECTION_NAME, points=points)
+class InMemoryFAISSIndex:
+    def __init__(self, dim):
+        self.index = faiss.IndexFlatIP(dim)
+        self.chunks = []
+        self.clauses = []
+        self.chunk_indices = []
 
-def search_qdrant_with_fallback(query, doc_source_name, top_k=5):
-    query_vec = get_text_embedding(query).tolist()
-    # Get more results to filter manually
-    results_doc = client.search(
-        collection_name=COLLECTION_NAME,
-        query_vector=query_vec,
-        limit=top_k * 5,  # get enough to filter
-    )
-    # Manually filter for source_name
-    doc_chunks = [
-        {'text': r.payload["text"], 'clause': r.payload.get("clause")}
-        for r in results_doc if r.payload.get("source") == doc_source_name
-    ]
-    doc_chunks = doc_chunks[:top_k]
-    # Fallback to full DB if not found in doc
-    fallback_chunks = None
-    if not doc_chunks or all(not c['text'].strip() for c in doc_chunks):
-        results_fallback = client.search(
-            collection_name=COLLECTION_NAME,
-            query_vector=query_vec,
-            limit=top_k,
-        )
-        fallback_chunks = [
-            {'text': r.payload["text"], 'clause': r.payload.get("clause")}
-            for r in results_fallback
-        ]
-    return doc_chunks, fallback_chunks
+    def build(self, chunks):
+        self.index.reset()
+        self.chunks = []
+        self.clauses = []
+        self.chunk_indices = []
+        if not chunks:
+            return
+        vectors = []
+        for i, chunk in enumerate(chunks):
+            vec = get_text_embedding(chunk)
+            vectors.append(vec)
+            self.chunks.append(chunk)
+            self.clauses.append(get_clause_number(chunk))
+            self.chunk_indices.append(i)
+        arr = np.stack(vectors)
+        self.index.add(arr)
 
-def call_gemini_flash(query, relevant_chunks, fallback_chunks=None):
-    prompt = f"""You are an insurance policy assistant.
-The user asked: {query}
+    def search(self, query, top_k=8):
+        q_emb = get_text_embedding(query)
+        q_emb = np.expand_dims(q_emb, axis=0)
+        D, I = self.index.search(q_emb, top_k)
+        results = []
+        for idx in I[0]:
+            if idx >= 0 and idx < len(self.chunks):
+                results.append({
+                    "text": self.chunks[idx],
+                    "clause": self.clauses[idx]
+                })
+        return results
 
-Here are relevant clauses from the uploaded document:
+faiss_index = InMemoryFAISSIndex(EMBED_DIM)
+
+def call_gemini_flash(query, relevant_chunks):
+    prompt = f"""You are an expert insurance policy assistant.
+The user asked: "{query}"
+
+Here are the most relevant clauses from the uploaded document (with clause/section numbers when available):
+
 """
     for i, chunk in enumerate(relevant_chunks):
         clause = chunk.get("clause")
-        clause_info = f" (Clause {clause})" if clause else ""
-        prompt += f"\n{str(i+1)}.{clause_info} {chunk['text']}"
+        clause_info = f"(Clause {clause}) " if clause else ""
+        prompt += f"{i+1}. {clause_info}{chunk['text'].strip()}\n\n"
 
-    if fallback_chunks:
-        prompt += "\n\nHere is additional context from other insurance documents in the database:"
-        for i, chunk in enumerate(fallback_chunks):
-            clause = chunk.get("clause")
-            clause_info = f" (Clause {clause})" if clause else ""
-            prompt += f"\n{str(i+1)}.{clause_info} {chunk['text']}"
-
-    prompt += """
-    Instructions:
-    - Return your answer as plain text only.
-    - Do not use any Markdown formatting (no bold, italics, bullet points, or backslashes).
-    - Cite clauses or sections if relevant, but keep the answer clear and easy to read.
-    - If the uploaded document provides a clear answer, cite it. If not, use context from other documents and clearly state that the answer is based on general insurance knowledge.
-    - Always answer professionally."""
+    prompt += """\
+Instructions:
+- Extract the answer ONLY from the provided clauses above. Do not use outside knowledge unless the answer is truly not present.
+- If the answer is not present, reply: "The document does not mention this."
+- When possible, cite the clause/section number in your answer.
+- Be concise, clear, and professional.
+- Return your answer as plain text only (no Markdown, no bullet points, no extra formatting).
+"""
     try:
         response = gemini_model.generate_content(prompt)
         return response.text.strip()
     except Exception as e:
         return f"Error: {str(e)}"
 
-def get_pdf_paragraphs(pdf_url):
+def get_pdf_text(pdf_url):
     response = requests.get(pdf_url)
     response.raise_for_status()
     pdf_bytes = response.content
     return extract_text_from_pdf(pdf_bytes)
 
-def ensure_doc_indexed(paragraphs, source_name):
-    try:
-        client.delete_collection(collection_name=COLLECTION_NAME)
-    except Exception:
-        pass
-    client.create_collection(
-        collection_name=COLLECTION_NAME,
-        vectors_config={"size": wv.vector_size, "distance": "Cosine"}
-    )
-    chunks = chunk_paragraphs(paragraphs)
-    add_chunks_to_qdrant(chunks, source_name)
+def ensure_doc_indexed(text):
+    # Improved clause-level chunking and in-memory FAISS indexing
+    chunks = clause_level_chunking(text)
+    faiss_index.build(chunks)
 
-def answer_questions(source_name, questions):
+def answer_questions(questions):
     answers = []
     for q in questions:
-        doc_chunks, fallback_chunks = search_qdrant_with_fallback(q, source_name, top_k=5)
-        answer = call_gemini_flash(q, doc_chunks, fallback_chunks)
+        doc_chunks = faiss_index.search(q, top_k=8)
+        answer = call_gemini_flash(q, doc_chunks)
         answers.append(answer)
     return answers
 
@@ -193,14 +186,15 @@ def hackrx_run():
         return jsonify({"error": "'questions' must be a list"}), 400
 
     try:
-        paragraphs = get_pdf_paragraphs(pdf_url)
-        ensure_doc_indexed(paragraphs, pdf_url)
+        text = get_pdf_text(pdf_url)
+        ensure_doc_indexed(text)
     except Exception as e:
         return jsonify({"error": f"Could not process document: {str(e)}"}), 400
 
-    answers = answer_questions(pdf_url, questions)
+    answers = answer_questions(questions)
     return jsonify({"answers": answers})
 
 @app.route("/", methods=["GET"])
 def home():
     return {"status": "ok"}
+

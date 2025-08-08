@@ -2,14 +2,17 @@ FROM python:3.10-slim
 
 WORKDIR /app
 
+# Install system dependencies for PyMuPDF
 RUN apt-get update && apt-get install -y libmupdf-dev && rm -rf /var/lib/apt/lists/*
 
+# Copy requirements first for better Docker cache usage
 COPY requirements.txt .
-RUN python -m venv /opt/venv && . /opt/venv/bin/activate && pip install --no-cache-dir -r requirements.txt
+RUN python -m venv /opt/venv && \
+    . /opt/venv/bin/activate && \
+    pip install --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
 
-# Download gensim model during build (this is the key fix)
-RUN . /opt/venv/bin/activate && python -m gensim.downloader --download glove-wiki-gigaword-50
-
+# Copy the rest of your code
 COPY . /app
 
 ENV PATH="/opt/venv/bin:$PATH"
