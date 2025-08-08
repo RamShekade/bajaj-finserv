@@ -5,7 +5,7 @@ pymupdf
 spacy>=3.7.2
 qdrant-client
 google-generativeai
-scipy==1.11.0
+scipy==1.11.4
 gensim>=4.3.2
 numpy>=1.25.2
 faiss-cpu
