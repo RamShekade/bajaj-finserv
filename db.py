@@ -3,9 +3,9 @@ import uuid
 import fitz  # PyMuPDF
 import numpy as np
 from tqdm import tqdm
-import gensim.downloader as api
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams, PointStruct
+from sentence_transformers import SentenceTransformer
 
 # --------------------------
 # 🔧 Qdrant + Embedding Config
@@ -13,13 +13,14 @@ from qdrant_client.models import Distance, VectorParams, PointStruct
 QDRANT_URL = "https://c8df992d-b432-4052-b952-145841797199.us-east4-0.gcp.cloud.qdrant.io:6333"
 QDRANT_API_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJhY2Nlc3MiOiJtIn0.Z_FhOR0cy8m4lNqLU4x6d_IGaSx-Avhxn-piRXKgdFs"
 COLLECTION_NAME = "insurance"
-EMBED_MODEL_NAME = "glove-wiki-gigaword-50"  # 50-dim GloVe embeddings
+EMBED_MODEL_NAME = "paraphrase-MiniLM-L6-v2"  # 384-dim sentence-transformers embeddings
 
 # --------------------------
 # ✅ Initialize
 # --------------------------
 qdrant = QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY)
-wv = api.load(EMBED_MODEL_NAME)  # Load GloVe embeddings
+embedder = SentenceTransformer(EMBED_MODEL_NAME)
+EMBED_DIM = embedder.get_sentence_embedding_dimension()
 
 # --------------------------
 # 1. Create Qdrant collection (if not exists)
@@ -28,7 +29,7 @@ def init_collection():
     if COLLECTION_NAME not in [c.name for c in qdrant.get_collections().collections]:
         qdrant.create_collection(
             COLLECTION_NAME,
-            vectors_config=VectorParams(size=50, distance=Distance.COSINE)
+            vectors_config=VectorParams(size=EMBED_DIM, distance=Distance.COSINE)
         )
         print(f"✅ Created collection: {COLLECTION_NAME}")
     else:
@@ -57,15 +58,11 @@ def split_into_chunks(text, max_words=120, overlap=30):
     return chunks
 
 # --------------------------
-# 4. Get GloVe embedding for a chunk
+# 4. Get embedding for a chunk using sentence-transformers
 # --------------------------
 def get_chunk_embedding(text):
-    words = text.split()
-    vecs = [wv[word] for word in words if word in wv]
-    if vecs:
-        return np.mean(vecs, axis=0)
-    else:
-        return np.zeros(wv.vector_size)
+    emb = embedder.encode([text], normalize_embeddings=True)
+    return emb[0].astype(np.float32)
 
 # --------------------------
 # 5. Upload Chunks to Qdrant

@@ -4,13 +4,11 @@ from flask import Flask, request, jsonify
 from qdrant_client import QdrantClient
 import fitz  # PyMuPDF
 import uuid
-import gensim.downloader as api
 import numpy as np
 import google.generativeai as genai
 import re
 import faiss
 from sentence_transformers import SentenceTransformer
-
 
 # ---- CONFIG ----
 QDRANT_URL = "https://c8df992d-b432-4052-b952-145841797199.us-east4-0.gcp.cloud.qdrant.io:6333"
@@ -24,9 +22,25 @@ genai.configure(api_key=GEMINI_API_KEY)
 gemini_model = genai.GenerativeModel("gemini-2.0-flash")
 
 embedder = SentenceTransformer("paraphrase-MiniLM-L6-v2")
-EMBED_DIM = 384
+EMBED_DIM = embedder.get_sentence_embedding_dimension()
 
 app = Flask(__name__)
+
+def search_qdrant(query, top_k=8):
+    query_emb = get_text_embedding(query)
+    hits = client.search(
+        collection_name=COLLECTION_NAME,
+        query_vector=query_emb.tolist(),
+        limit=top_k
+    )
+    results = []
+    for hit in hits:
+        payload = hit.payload
+        results.append({
+            "text": payload.get("text", ""),
+            "clause": payload.get("clause", None)
+        })
+    return results
 
 def extract_text_from_pdf(pdf_bytes):
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
@@ -121,11 +135,16 @@ class InMemoryFAISSIndex:
 
 faiss_index = InMemoryFAISSIndex(EMBED_DIM)
 
-def call_gemini_flash(query, relevant_chunks):
+def call_gemini_flash(query, relevant_chunks, source="document"):
+    if source == "document":
+        intro = "Here are the most relevant clauses from the uploaded document"
+    else:
+        intro = "Here are the most relevant pieces of knowledge from the knowledge base"
+
     prompt = f"""You are an expert insurance policy assistant.
 The user asked: "{query}"
 
-Here are the most relevant clauses from the uploaded document (with clause/section numbers when available):
+{intro} (with clause/section numbers when available):
 
 """
     for i, chunk in enumerate(relevant_chunks):
@@ -135,8 +154,8 @@ Here are the most relevant clauses from the uploaded document (with clause/secti
 
     prompt += """\
 Instructions:
-- Extract the answer ONLY from the provided clauses above. Do not use outside knowledge unless the answer is truly not present.
-- If the answer is not present, reply: "The document does not mention this."
+- Extract the answer ONLY from the provided pieces above. Do not use outside knowledge unless the answer is truly not present.
+- If the answer is not present, reply: "The answer is not present in the knowledge base."
 - When possible, cite the clause/section number in your answer.
 - Be concise, clear, and professional.
 - Return your answer as plain text only (no Markdown, no bullet points, no extra formatting).
@@ -162,8 +181,16 @@ def answer_questions(questions):
     answers = []
     for q in questions:
         doc_chunks = faiss_index.search(q, top_k=8)
-        answer = call_gemini_flash(q, doc_chunks)
-        answers.append(answer)
+        answer = call_gemini_flash(q, doc_chunks, source="document")
+        # Accept both "the document does not mention" and "the answer is not present in the knowledge base"
+        if answer.strip().lower().startswith("the document does not mention") or \
+           answer.strip().lower().startswith("the answer is not present"):
+            # fallback to knowledge base
+            kb_chunks = search_qdrant(q, top_k=8)
+            kb_answer = call_gemini_flash(q, kb_chunks, source="knowledge_base")
+            answers.append(kb_answer)
+        else:
+            answers.append(answer)
     return answers
 
 @app.route("/hackrx/run", methods=["POST"])
@@ -198,3 +225,5 @@ def hackrx_run():
 def home():
     return {"status": "ok"}
 
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=8000, debug=True)
