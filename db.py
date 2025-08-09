@@ -189,4 +189,4 @@ def embed_and_upload(json_path):
 
 if __name__ == "__main__":
     init_collection()
-    embed_and_upload("insurance_qa_dataset.json")
+    embed_and_upload("combined_policy_dataset.json")

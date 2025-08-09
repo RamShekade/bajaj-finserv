@@ -145,7 +145,8 @@ def call_gemini_flash(query, relevant_chunks, source="document"):
 
 The user has asked: "{query}"
 
-{intro} Each clause may contain conditions, eligibility criteria, waiting periods, or exclusions:
+{intro}
+Each clause below may contain coverage conditions, eligibility, waiting periods, sub-limits, or exclusions.
 
 """
     for i, chunk in enumerate(relevant_chunks):
@@ -155,20 +156,22 @@ The user has asked: "{query}"
 
     prompt += """\
 Instructions:
-- Carefully analyze the user's query and extract all relevant details (such as age, procedure, location, policy duration, pre-existing conditions, etc.).
-- Study the provided clauses and determine whether, based on the specific conditions in the query, the request should be approved or denied.
-- If a condition in the query fails to meet eligibility or waiting period requirements in the context, clearly explain this in your answer and cite the relevant clause or section.
-- Your answer must be based ONLY on the provided clauses. Do not assume or invent information not present in the context.
-- If the answer is not present in the context, reply: "The answer is not present in the knowledge base."
-- When possible, cite the clause/section number(s) in your explanation.
-- Return your answer as a single, concise, clear, and professional plain text string (not JSON, not Markdown).
+- First, extract any user-specific details (such as age, policy duration, procedure, relationship, pre-existing conditions, etc.) from the query.
+- Analyze each provided clause in relation to the user's specific details and question.
+- Your response MUST be directly based on the clauses above. Do not assume or invent any information not present in the context.
+- Always return a single, clear, and concise answer: begin with a direct YES/NO/NOT COVERED/ELIGIBLE/NOT ELIGIBLE if possible, then briefly explain why, referencing the relevant clause(s) by number.
+- If the answer is not present in the provided clauses, reply exactly: "The answer is not present in the knowledge base."
+- Avoid copying large blocks of text; summarize and cite.
+- Do not use legalistic or verbose language; answer as simply and professionally as possible.
+- Do NOT return JSON, Markdown, or lists—just a single plain text answer.
 """
+
     try:
         response = gemini_model.generate_content(prompt)
         return response.text.strip()
     except Exception as e:
         return f"Error: {str(e)}"
-
+    
 def get_pdf_text(pdf_url):
     response = requests.get(pdf_url)
     response.raise_for_status()
