@@ -13,7 +13,7 @@ from sentence_transformers import SentenceTransformer
 # ---- CONFIG ----
 QDRANT_URL = "https://c8df992d-b432-4052-b952-145841797199.us-east4-0.gcp.cloud.qdrant.io:6333"
 QDRANT_API_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJhY2Nlc3MiOiJtIn0.Z_FhOR0cy8m4lNqLU4x6d_IGaSx-Avhxn-piRXKgdFs"
-COLLECTION_NAME = "insurance"
+COLLECTION_NAME = "insurance_queries"
 GEMINI_API_KEY = "AIzaSyBcieQSbcnDkWnxcRyHKusdp5-TQWK-5Fs"
 EXPECTED_API_KEY = "74915bc2932a330cb216159be4298485ee0af534a2d30eacee1be61d2158d6b2"
 
@@ -137,14 +137,15 @@ faiss_index = InMemoryFAISSIndex(EMBED_DIM)
 
 def call_gemini_flash(query, relevant_chunks, source="document"):
     if source == "document":
-        intro = "Here are the most relevant clauses from the uploaded document"
+        intro = "Here are the most relevant clauses from the uploaded document."
     else:
-        intro = "Here are the most relevant pieces of knowledge from the knowledge base"
+        intro = "Here are the most relevant pieces of knowledge from the knowledge base."
+    
+    prompt = f"""You are an expert insurance policy analyst.
 
-    prompt = f"""You are an expert insurance policy assistant.
-The user asked: "{query}"
+The user has asked: "{query}"
 
-{intro} (with clause/section numbers when available):
+{intro} Each clause may contain conditions, eligibility criteria, waiting periods, or exclusions:
 
 """
     for i, chunk in enumerate(relevant_chunks):
@@ -154,11 +155,13 @@ The user asked: "{query}"
 
     prompt += """\
 Instructions:
-- Extract the answer ONLY from the provided pieces above. Do not use outside knowledge unless the answer is truly not present.
-- If the answer is not present, reply: "The answer is not present in the knowledge base."
-- When possible, cite the clause/section number in your answer.
-- Be concise, clear, and professional.
-- Return your answer as plain text only (no Markdown, no bullet points, no extra formatting).
+- Carefully analyze the user's query and extract all relevant details (such as age, procedure, location, policy duration, pre-existing conditions, etc.).
+- Study the provided clauses and determine whether, based on the specific conditions in the query, the request should be approved or denied.
+- If a condition in the query fails to meet eligibility or waiting period requirements in the context, clearly explain this in your answer and cite the relevant clause or section.
+- Your answer must be based ONLY on the provided clauses. Do not assume or invent information not present in the context.
+- If the answer is not present in the context, reply: "The answer is not present in the knowledge base."
+- When possible, cite the clause/section number(s) in your explanation.
+- Return your answer as a single, concise, clear, and professional plain text string (not JSON, not Markdown).
 """
     try:
         response = gemini_model.generate_content(prompt)
@@ -224,3 +227,6 @@ def hackrx_run():
 @app.route("/", methods=["GET"])
 def home():
     return {"status": "ok"}
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=8000, debug=True)
